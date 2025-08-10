@@ -111,6 +111,6 @@ def extract_message(image_path: str, password: str) -> str:
 # 示例
 # ======================
 if __name__ == "__main__":
-    embed_message("img.png", "你好，这是双重加密的机密信息", "mypassword123", "encoded.png")
+    embed_message("img.png", "u can write something here", "mypassword123", "encoded.png")
     msg = extract_message("encoded.png", "mypassword123")
     print("提取内容：", msg)
