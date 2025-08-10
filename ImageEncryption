@@ -1,0 +1,116 @@
+from PIL import Image
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+import numpy as np
+import base64
+import hashlib
+import os
+import secrets
+
+
+# ======================
+# 密码派生函数
+# ======================
+def password_to_key(password: str) -> bytes:
+    """将密码转换为Fernet需要的32字节密钥"""
+    return base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
+
+
+# ======================
+# 双重加密
+# ======================
+def double_encrypt(message: str, password: str) -> bytes:
+    # 第一层加密：Fernet
+    fernet_key = password_to_key(password)
+    fernet = Fernet(fernet_key)
+    encrypted1 = fernet.encrypt(message.encode())
+
+    # 第二层加密：ChaCha20
+    chacha_key = secrets.token_bytes(32)
+    chacha_nonce = secrets.token_bytes(12)
+    chacha = ChaCha20Poly1305(chacha_key)
+    encrypted2 = chacha.encrypt(chacha_nonce, encrypted1, None)
+
+    # 返回：ChaCha20密钥+nonce+密文，一起再做隐写
+    return chacha_key + chacha_nonce + encrypted2
+
+
+# ======================
+# 双重解密
+# ======================
+def double_decrypt(encrypted_data: bytes, password: str) -> str:
+    # 分离 ChaCha20 部分
+    chacha_key = encrypted_data[:32]
+    chacha_nonce = encrypted_data[32:44]
+    chacha_ciphertext = encrypted_data[44:]
+
+    # 解ChaCha20
+    chacha = ChaCha20Poly1305(chacha_key)
+    decrypted1 = chacha.decrypt(chacha_nonce, chacha_ciphertext, None)
+
+    # 解Fernet
+    fernet_key = password_to_key(password)
+    fernet = Fernet(fernet_key)
+    return fernet.decrypt(decrypted1).decode()
+
+
+# ======================
+# 嵌入信息（带抗检测混淆）
+# ======================
+def embed_message(image_path: str, message: str, password: str, output_path: str):
+    img = Image.open(image_path).convert("RGB")
+    data = np.array(img)
+
+    encrypted = double_encrypt(message, password)
+
+    # 抗检测：在加密数据前后添加随机噪声填充
+    noise_prefix = secrets.token_bytes(32)
+    noise_suffix = secrets.token_bytes(32)
+    payload = noise_prefix + encrypted + noise_suffix
+
+    binary = ''.join(format(byte, '08b') for byte in payload) + '00000000' * 2  # 结束符
+
+    flat = data.flatten()
+    if len(binary) > len(flat):
+        raise ValueError("Message too large for this image.")
+
+    for i in range(len(binary)):
+        flat[i] = (flat[i] & 0b11111110) | int(binary[i])
+
+    new_img = flat.reshape(data.shape)
+    Image.fromarray(new_img.astype(np.uint8)).save(output_path)
+
+
+# ======================
+# 提取信息
+# ======================
+def extract_message(image_path: str, password: str) -> str:
+    img = Image.open(image_path).convert("RGB")
+    data = np.array(img).flatten()
+
+    bits = []
+    for i in range(len(data)):
+        bits.append(str(data[i] & 1))
+
+    byte_data = []
+    for i in range(0, len(bits), 8):
+        byte = bits[i:i+8]
+        if byte == ['0']*8 and bits[i+8:i+16] == ['0']*8:
+            break
+        byte_data.append(int(''.join(byte), 2))
+
+    payload = bytes(byte_data)
+
+    # 去掉噪声前后填充
+    encrypted = payload[32:-32]
+
+    return double_decrypt(encrypted, password)
+
+
+# ======================
+# 示例
+# ======================
+if __name__ == "__main__":
+    embed_message("img.png", "你好，这是双重加密的机密信息", "mypassword123", "encoded.png")
+    msg = extract_message("encoded.png", "mypassword123")
+    print("提取内容：", msg)
